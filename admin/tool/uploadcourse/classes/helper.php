@@ -18,7 +18,7 @@
  * File containing the helper class.
  *
  * @package    tool_uploadcourse
- * @copyright  2013 Frédéric Massart
+ * @copyright  2013 Frédéric Massart, 2017 Konrad Lorinczi (implemented automatic category creation from CSV)
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
@@ -36,6 +36,25 @@ require_once($CFG->dirroot . '/backup/util/includes/restore_includes.php');
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class tool_uploadcourse_helper {
+
+    /** @var object course object from course class */
+    protected static $course_obj;
+
+    /** @var int virtual counter for simulating category creation */
+    protected static $virtual_id_counter;
+
+    /** @var object virtual category table to simulate category creation */
+    protected static $virtual_category_table;
+    
+    /**
+     * Save course object
+     *
+     * @param int $course_obj course object to reuse in this class
+     */
+    public static function set_course_obj($course_obj) {
+        self::$course_obj = $course_obj;
+    }
+    
 
     /**
      * Generate a shortname based on a template.
@@ -57,7 +76,7 @@ class tool_uploadcourse_helper {
         $idnumber   = isset($course->idnumber) ? $course->idnumber  : '';
 
         $callback = partial(array('tool_uploadcourse_helper', 'generate_shortname_callback'), $fullname, $idnumber);
-        $result = preg_replace_callback('/(?<!%)%([+~-])?(\d)*([fi])/', $callback, $templateshortname);
+        $result = str_replace_callback('/(?<!%)%([+~-])?(\d)*([fi])/', $callback, $templateshortname);
 
         if (!is_null($result)) {
             $result = clean_param($result, PARAM_TEXT);
@@ -75,7 +94,7 @@ class tool_uploadcourse_helper {
      *
      * @param string $fullname full name.
      * @param string $idnumber ID number.
-     * @param array $block result from preg_replace_callback.
+     * @param array $block result from str_replace_callback.
      * @return string
      */
     public static function generate_shortname_callback($fullname, $idnumber, $block) {
@@ -396,13 +415,20 @@ class tool_uploadcourse_helper {
             }
         }
         if (empty($catid) && !empty($data['category_path'])) {
-            $catid = self::resolve_category_by_path(explode(' / ', $data['category_path']));
-            if (empty($catid)) {
-                $errors['couldnotresolvecatgorybypath'] =
-                    new lang_string('couldnotresolvecatgorybypath', 'tool_uploadcourse');
+            $result = self::resolve_category_by_path(explode(' / ', $data['category_path']));
+            // $result has 3 return states: 1) false: couldnotresolvecatgorybypath, 2) $result['id'] is set: all categories exists in path, deepest id returned, 3) array: means, at least one category was not resolved
+
+            if ($result == false) {
+                $catid = false;
+            } else if (isset($result['id'])) {
+                $catid = $result['id'];
+            } else {
+                $errors_array = array();
+                foreach ($result as $cat => $values) {
+                    $catid = $values->id;
+                }
             }
         }
-
         return $catid;
     }
 
@@ -440,30 +466,110 @@ class tool_uploadcourse_helper {
      * Resolve a category by path.
      *
      * @param array $path category names indexed from parent to children.
-     * @return int category ID.
+     * @return array of result or errors or false
      */
     public static function resolve_category_by_path(array $path) {
         global $DB;
         $cache = cache::make('tool_uploadcourse', 'helper');
+        $serialized_path = serialize($path);
+        $path_orig = $path;
+        $path_orig_flat = trim(join(' / ', $path));
+        $result = array();
         $cachekey = 'cat_path_' . serialize($path);
         if (($id = $cache->get($cachekey)) === false) {
+            $virtual_id_base = 9000000000; // use an unlikely big number as base id number
+            $virtual_id = self::$virtual_id_counter; // use last used virtual number
             $parent = 0;
+            $id_last = 0;
+            $path_current = array();
+            
             $sql = 'name = :name AND parent = :parent';
             while ($name = array_shift($path)) {
+                $path_current[] = $name;
+                $path_current_flat = trim(join(' / ', $path_current));
+                $parent = $id_last;
                 $params = array('name' => $name, 'parent' => $parent);
+                
                 if ($records = $DB->get_records_select('course_categories', $sql, $params, null, 'id, parent')) {
+                    // CATEGORY EXISTS.
                     if (count($records) > 1) {
-                        // Too many records with the same name!
+                        // Too many category records with the same name!
                         $id = -1;
                         break;
                     }
+                    // Only 1 category exists. Great! Save it labeled as db type.
                     $record = reset($records);
+                    $record->name = $name;
+                    $record->db_type = 'db';
+                    $record->category_path = $path_current_flat;
+                    self::$virtual_category_table[$path_current_flat] = $record;
                     $id = $record->id;
-                    $parent = $record->id;
+                    $id_last = $id;
                 } else {
-                    // Not found.
-                    $id = -1;
-                    break;
+                    // CATEGORY DOESN'T EXIST!
+                    $allowcategoryautocreate = self::$course_obj->can_create_category();
+                    $is_preview_mode = self::$course_obj->get_preview_mode();
+                    if ($allowcategoryautocreate) {
+                        // Category doesn't exist, but we are allowed to create it.
+                        if ($is_preview_mode) {
+                            // If we are in PREVIEW mode, so we don't create category, just using a virtual id in virtual_category_table variable to simulate creation
+                            // initialize self::$virtual_category_table variable, when needed
+                            self::$virtual_category_table = (isset(self::$virtual_category_table)) ? self::$virtual_category_table : array();
+
+                            // check, if category exists already in virtual_category_table
+                            $cat_exists_already = array_key_exists($path_current_flat, self::$virtual_category_table);
+                            if ($cat_exists_already) {
+                                // we already have this category in virtual table
+                                $virtual_id = self::$virtual_category_table[$path_current_flat]->{'id'};
+                            } else {
+                                // we don't have this category in virtual table, so create one
+                                self::$virtual_id_counter++;
+                                $virtual_id = $virtual_id_base + self::$virtual_id_counter;
+                                $options= array(
+                                    'autocaton' => get_string('autocaton', 'tool_uploadcourse'),
+                                    'category_path' => $path_current_flat,
+                                    'categorywillbecreatedmessage' => get_string('categorywillbecreatedmessage', 'tool_uploadcourse'),
+                                );
+                                $record = array(
+                                    'id' => $virtual_id,
+                                    'parent' => $id_last,
+                                    'name' => $name,
+                                    'db_type' => 'virtual',
+                                    'category_path' => $path_current_flat,
+                                    'status' => new lang_string('categorydoesnotexistwillbecreated', 'tool_uploadcourse', $options)
+                                );
+                                self::$virtual_category_table[$path_current_flat] = (object) $record;
+                                self::$course_obj->status('categorydoesnotexistwillbecreated', new lang_string('categorydoesnotexistwillbecreated', 'tool_uploadcourse', $options));
+                                $result[$path_current_flat] = (object) $record;
+                            }
+                            $id = $virtual_id;
+                            $id_last = $virtual_id;
+                        } else {
+                            $params['parent'] = $id_last;
+                            $result_cat_obj = coursecat::create($params);
+                            if (!$result_cat_obj) {
+                                throw new moodle_exception(get_string('cannotcreatecategory', 'tool_uploadcourse', $path));
+                            }
+                            self::$course_obj->status('categorycreated', new lang_string('categorycreated', 'tool_uploadcourse', $path_current_flat));
+                            $id = $result_cat_obj->id;
+                            $id_last = $result_cat_obj->id;
+                            $parent = $result_cat_obj->{'parent'};
+                        }
+                    } else {
+                        // WE ARE NOT ALLOWED TO CREATE CATEGORY! SO RETURN INVALID ID.
+                        $id = -1;
+                        $record = array(
+                            'id' => $id,
+                            'parent' => $id,
+                            'name' => $name,
+                            'db_type' => 'no_create_permission',
+                            'category_path' => $path_current_flat,
+                            'error' => new lang_string('couldnotresolvecatgorybypath', 'tool_uploadcourse')
+                        );
+                        $result[$path_current_flat] = (object) $record;
+                        self::$course_obj->error('couldnotresolvecatgorybypath', new lang_string('couldnotresolvecatgorybypath', 'tool_uploadcourse'));
+                        break;
+                    }
                 }
             }
             $cache->set($cachekey, $id);
@@ -471,9 +577,29 @@ class tool_uploadcourse_helper {
 
         // We save -1 when the category has not been found to be able to know if the cache was set.
         if ($id == -1) {
-            $id = false;
+            return false;
         }
-        return $id;
+        
+        // Return id key of deepest category found in the path (if all categories in the path exists)
+        if (count(array_keys($result)) === 0 and $id > 0) {
+            $result['id'] = $id;
+        }
+        
+        // Debug message showing the virtual_category_table
+        $debug_msg = str_replace(array("\r\n", "\n", "\r"), '<br />', var_export(self::$virtual_category_table, true));
+        $debug_msg = str_replace(array("  "), '&nbsp;&nbsp;', $debug_msg);
+        debugging('Debug: self::$virtual_category_table (admin/tool/uploadcourse/classes/helper.php): ' . $debug_msg . "<br>\n", DEBUG_DEVELOPER);
+        
+        return $result;
+    }
+    
+    
+    /**
+     * Reset virtual counter, which is used for simulating category creation
+     *
+     */
+    public static function reset_virtual_id_counter() {
+        self::$virtual_id_counter = 0;
     }
 
 }
