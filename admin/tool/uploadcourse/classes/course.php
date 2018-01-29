@@ -18,7 +18,7 @@
  * File containing the course class.
  *
  * @package    tool_uploadcourse
- * @copyright  2013 Frédéric Massart
+ * @copyright  2013 Frédéric Massart, 2017 Konrad Lorinczi (implemented automatic category creation from CSV)
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
@@ -30,7 +30,7 @@ require_once($CFG->dirroot . '/course/lib.php');
  * Course class.
  *
  * @package    tool_uploadcourse
- * @copyright  2013 Frédéric Massart
+ * @copyright  2013 Frédéric Massart, 2017 Konrad Lorinczi (implemented automatic category creation from CSV)
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class tool_uploadcourse_course {
@@ -74,6 +74,9 @@ class tool_uploadcourse_course {
     /** @var bool set to true once we have prepared the course */
     protected $prepared = false;
 
+    /** @var bool set preview mode, if true, will not make database modifications like category creation */
+    protected $preview_mode = false;
+
     /** @var bool set to true once we have started the process of the course */
     protected $processstarted = false;
 
@@ -105,7 +108,7 @@ class tool_uploadcourse_course {
         'templatecourse' => null, 'reset' => false);
 
     /** @var array options determining what can or cannot be done at an import level. */
-    static protected $importoptionsdefaults = array('canrename' => false, 'candelete' => false, 'canreset' => false,
+    static protected $importoptionsdefaults = array('cancreatecategory' => false, 'canrename' => false, 'candelete' => false, 'canreset' => false,
         'reset' => false, 'restoredir' => null, 'shortnametemplate' => null);
 
     /**
@@ -149,6 +152,18 @@ class tool_uploadcourse_course {
         foreach (self::$importoptionsdefaults as $option => $default) {
             $this->importoptions[$option] = isset($importoptions[$option]) ? $importoptions[$option] : $default;
         }
+        
+        // Save course into tool_uploadcourse_helper static method, to reuse it
+        tool_uploadcourse_helper::set_course_obj($this);
+    }
+
+    /**
+     * Does the mode allow automatic category creation?
+     *
+     * @return bool
+     */
+    public function can_create_category() {
+        return $this->importoptions['cancreatecategory'];
     }
 
     /**
@@ -240,13 +255,12 @@ class tool_uploadcourse_course {
      *
      * @param string $code error code.
      * @param lang_string $message error message.
+     // * @param $message error message.
      * @return void
      */
-    protected function error($code, lang_string $message) {
-        if (array_key_exists($code, $this->errors)) {
-            throw new coding_exception('Error code already defined');
-        }
-        $this->errors[$code] = $message;
+    public function error($code, lang_string $message) {
+        // we use array for messages, thus making possible to handle multiple errors within same code
+        $this->errors[$code][] = $message;
     }
 
     /**
@@ -949,11 +963,32 @@ class tool_uploadcourse_course {
      * @param lang_string $message status message.
      * @return void
      */
-    protected function status($code, lang_string $message) {
-        if (array_key_exists($code, $this->statuses)) {
-            throw new coding_exception('Status code already defined');
+    public function status($code, lang_string $message) {
+        // we use array for messages, thus making possible to handle multiple statuses within same code
+        $this->statuses[$code][] = $message;
+    }
+    
+    /**
+     * Set preview mode to avoid modifications (like category creation in preview mode)
+     *
+     * @param bool $preview_mode set preview mode, if true, will not make database modifications like category creation.
+     * @return void
+     */
+    public function set_preview_mode($preview_mode) {
+        $this->preview_mode = true;
+    }
+    
+    /**
+     * Get preview mode
+     *
+     * @return bool $preview_mode preview mode.
+     */
+    public function get_preview_mode() {
+        if (! isset($this->preview_mode)) {
+            $this->preview_mode = false;
         }
-        $this->statuses[$code] = $message;
+        return $this->preview_mode;
     }
 
+    
 }

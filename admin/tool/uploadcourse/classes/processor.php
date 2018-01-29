@@ -18,7 +18,7 @@
  * File containing processor class.
  *
  * @package    tool_uploadcourse
- * @copyright  2013 Frédéric Massart
+ * @copyright  2013 Frédéric Massart, 2017 Konrad Lorinczi (implemented automatic category creation from CSV)
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
@@ -79,6 +79,9 @@ class tool_uploadcourse_processor {
 
     /** @var int upload mode. */
     protected $updatemode;
+
+    /** @var bool are automatic category creation allowed. */
+    protected $allowcategoryautocreate = false;
 
     /** @var bool are renames allowed. */
     protected $allowrenames = false;
@@ -141,6 +144,9 @@ class tool_uploadcourse_processor {
             // Force int to make sure === comparison work as expected.
             $this->updatemode = (int) $options['updatemode'];
         }
+        if (isset($options['allowcategoryautocreate'])) {
+            $this->allowcategoryautocreate = $options['allowcategoryautocreate'];
+        }
         if (isset($options['allowrenames'])) {
             $this->allowrenames = $options['allowrenames'];
         }
@@ -189,6 +195,7 @@ class tool_uploadcourse_processor {
         $tracker->start();
 
         $total = 0;
+        $cat_created = 0;
         $created = 0;
         $updated = 0;
         $deleted = 0;
@@ -202,18 +209,35 @@ class tool_uploadcourse_processor {
         while ($line = $this->cir->next()) {
             $this->linenb++;
             $total++;
-
             $data = $this->parse_line($line);
             $course = $this->get_course($data);
             if ($course->prepare()) {
                 $course->proceed();
-
                 $status = $course->get_statuses();
+                
+                // Debug message showing the statuses
+                $debug_msg = str_replace(array("\r\n", "\n", "\r"), '<br />', var_export($status, true));
+                $debug_msg = str_replace(array("  "), '&nbsp;&nbsp;', $debug_msg);
+                debugging('Debug: status (admin/tool/uploadcourse/classes/processor.php execute()): ' . $debug_msg . "<br>\n", DEBUG_DEVELOPER);
+                
+                if (array_key_exists('categorycreated', $status)) {
+                    if (is_array($status['categorycreated'])) {
+                        $status_num = count(array_keys($status['categorycreated']));
+                        $cat_created = $cat_created + $status_num;
+                    } else {
+                        $cat_created++;
+                    }
+                }
+
                 if (array_key_exists('coursecreated', $status)) {
                     $created++;
-                } else if (array_key_exists('courseupdated', $status)) {
+                }
+
+                if (array_key_exists('courseupdated', $status)) {
                     $updated++;
-                } else if (array_key_exists('coursedeleted', $status)) {
+                }
+
+                if (array_key_exists('coursedeleted', $status)) {
                     $deleted++;
                 }
 
@@ -221,12 +245,17 @@ class tool_uploadcourse_processor {
                 $tracker->output($this->linenb, true, $status, $data);
             } else {
                 $errors++;
-                $tracker->output($this->linenb, false, $course->get_errors(), $data);
+                $status = $course->get_errors();
+                // Debug message showing the error statuses
+                $debug_msg = str_replace(array("\r\n", "\n", "\r"), '<br />', var_export($status, true));
+                $debug_msg = str_replace(array("  "), '&nbsp;&nbsp;', $debug_msg);
+                debugging('Debug: errors (admin/tool/uploadcourse/classes/processor.php execute()): ' . $debug_msg . "<br>\n", DEBUG_DEVELOPER);
+                $tracker->output($this->linenb, false, $status, $data);
             }
         }
 
         $tracker->finish();
-        $tracker->results($total, $created, $updated, $deleted, $errors);
+        $tracker->results($total, $cat_created, $created, $updated, $deleted, $errors);
     }
 
     /**
@@ -237,6 +266,7 @@ class tool_uploadcourse_processor {
      */
     protected function get_course($data) {
         $importoptions = array(
+            'cancreatecategory' => $this->allowcategoryautocreate,
             'candelete' => $this->allowdeletes,
             'canrename' => $this->allowrenames,
             'canreset' => $this->allowresets,
@@ -340,21 +370,38 @@ class tool_uploadcourse_processor {
 
         // Loop over the CSV lines.
         $preview = array();
+        tool_uploadcourse_helper::reset_virtual_id_counter();
         while (($line = $this->cir->next()) && $rows > $this->linenb) {
             $this->linenb++;
             $data = $this->parse_line($line);
             $course = $this->get_course($data);
+            $course->set_preview_mode(true);    // turn on preview mode for a while
             $result = $course->prepare();
             if (!$result) {
-                $tracker->output($this->linenb, $result, $course->get_errors(), $data);
+                $status = $course->get_errors();
+                
+                // Debug message showing the errors statuses
+                $debug_msg = str_replace(array("\r\n", "\n", "\r"), '<br />', var_export($status, true));
+                $debug_msg = str_replace(array("  "), '&nbsp;&nbsp;', $debug_msg);
+                debugging('Debug: errors (admin/tool/uploadcourse/classes/processor.php preview()): ' . $debug_msg . "<br>\n", DEBUG_DEVELOPER);
+                
+                $tracker->output($this->linenb, $result, $status, $data);
             } else {
-                $tracker->output($this->linenb, $result, $course->get_statuses(), $data);
+                $status = $course->get_statuses();
+                
+                // Debug message showing the statuses
+                $debug_msg = str_replace(array("\r\n", "\n", "\r"), '<br />', var_export($status, true));
+                $debug_msg = str_replace(array("  "), '&nbsp;&nbsp;', $debug_msg);
+                debugging('Debug: status (admin/tool/uploadcourse/classes/processor.php preview()): ' . $debug_msg . "<br>\n", DEBUG_DEVELOPER);
+                
+                $tracker->output($this->linenb, $result, $status, $data);
             }
             $row = $data;
             $preview[$this->linenb] = $row;
         }
 
         $tracker->finish();
+        $course->set_preview_mode(false);    // turn off preview mode
 
         return $preview;
     }
